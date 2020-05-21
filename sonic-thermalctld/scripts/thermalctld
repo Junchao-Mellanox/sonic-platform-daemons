@@ -643,12 +643,15 @@ class ThermalControlDaemon(DaemonBase):
         except Exception as e:
             logger.log_error('Caught exception while initializing thermal manager - {}'.format(e))
 
-        while not self.stop_event.wait(ThermalControlDaemon.INTERVAL):
+        while 1:
             try:
                 if thermal_manager:
                     thermal_manager.run_policy(chassis)
             except Exception as e:
                 logger.log_error('Caught exception while running thermal policy - {}'.format(e))
+
+            if self.stop_event.wait(ThermalControlDaemon.INTERVAL):
+                break
 
         try:
             if thermal_manager:
