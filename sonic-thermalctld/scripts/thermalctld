@@ -540,6 +540,36 @@ class TemperatureUpdater(object):
         self.table.set(name, fvs)
 
 
+#
+# AsicUpdater  ======================================================================
+#
+class AsicUpdater(object):
+    # Chassis information table name in database
+    CHASSIS_INFO_TABLE_NAME = 'CHASSIS_INFO'
+    CHASSIS_INFO_TABLE_KEY = 'chassis 1'
+
+    def __init__(self, chassis):
+        """
+        Constructor of AsicUpdater 
+        :param chassis: Object representing a platform chassis
+        """
+        self.chassis = chassis
+        state_db = daemon_base.db_connect("STATE_DB")
+        self.table = swsscommon.Table(state_db, AsicUpdater.CHASSIS_INFO_TABLE_NAME)
+
+    def update(self):
+        try:
+            temperature = try_get(self.chassis.get_asic_temperature)
+            temperature_threshold = try_get(self.chassis.get_asic_temperature_threshold)
+            fvs = swsscommon.FieldValuePairs(
+                [('temp', str(temperature)),
+                ('temp_th', str(temperature_threshold))
+                ])
+            self.table.set(AsicUpdater.CHASSIS_INFO_TABLE_KEY, fvs)
+        except Exception as e:
+            logger.log_warning('Failed to update ASIC status - {}'.format(e))
+
+
 class ThermalMonitor(ProcessTaskBase):
     # Initial update interval
     INITIAL_INTERVAL = 5
@@ -556,6 +586,7 @@ class ThermalMonitor(ProcessTaskBase):
         ProcessTaskBase.__init__(self)
         self.fan_updater = FanUpdater(chassis)
         self.temperature_updater = TemperatureUpdater(chassis)
+        self.asic_updater = AsicUpdater(chassis)
 
     def task_worker(self):
         """
@@ -570,6 +601,7 @@ class ThermalMonitor(ProcessTaskBase):
             begin = time.time()
             self.fan_updater.update()
             self.temperature_updater.update()
+            self.asic_updater.update()
             elapse = time.time() - begin
             if elapse < ThermalMonitor.UPDATE_INTERVAL:
                 wait_time = ThermalMonitor.UPDATE_INTERVAL - elapse
