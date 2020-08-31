@@ -14,7 +14,7 @@ try:
     import sys
     import threading
 
-    from sonic_py_common import daemon_base
+    from sonic_py_common import daemon_base, logger
     from swsscommon import swsscommon
 except ImportError as e:
     raise ImportError (str(e) + " - required module not found")
@@ -134,6 +134,7 @@ def try_get(callback, default=None):
 def log_on_status_changed(logger, normal_status, normal_log, abnormal_log):
     """
     Log when any status changed
+    :param logger: Logger object.
     :param normal_status: Expected status.
     :param normal_log: Log string for expected status.
     :param abnormal_log: Log string for unexpected status
