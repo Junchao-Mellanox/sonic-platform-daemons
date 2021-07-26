@@ -11,6 +11,12 @@ class PortChangeEvent:
         # Port change event type
         self.event_type = event_type
 
+    def __str__(self):
+        return '{} - name={} index={} asic_id={}'.format('Add' if self.event_type == self.PORT_ADD else 'Remove',
+                                                         self.port_name,
+                                                         self.port_index,
+                                                         self.asic_id)
+
 
 class PortMapping:
     def __init__(self):

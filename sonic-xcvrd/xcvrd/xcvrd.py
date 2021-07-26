@@ -313,7 +313,7 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
 
 
 def post_port_dom_threshold_info_to_db(logical_port_name, port_mapping, table,
-                                       stop=threading.Event()):
+                                       stop=threading.Event(), dom_th_info_cache=None):
     ganged_port = False
     ganged_member_num = 1
 
@@ -337,7 +337,14 @@ def post_port_dom_threshold_info_to_db(logical_port_name, port_mapping, table,
         ganged_member_num += 1
 
         try:
-            dom_info_dict = _wrapper_get_transceiver_dom_threshold_info(physical_port)
+            if dom_th_info_cache is not None and physical_port in dom_th_info_cache:
+                # If cache is enabled and there is a cache, no need read from EEPROM, just read from cache
+                dom_info_dict = dom_th_info_cache[physical_port]
+            else:
+                dom_info_dict = _wrapper_get_transceiver_dom_threshold_info(physical_port)
+                if dom_th_info_cache is not None:
+                    # If cache is enabled, put dom threshold infomation to cache
+                    dom_th_info_cache[physical_port] = dom_info_dict
             if dom_info_dict is not None:
                 beautify_dom_threshold_info_dict(dom_info_dict)
                 fvs = swsscommon.FieldValuePairs(
@@ -373,7 +380,7 @@ def post_port_dom_threshold_info_to_db(logical_port_name, port_mapping, table,
 # Update port dom sensor info in db
 
 
-def post_port_dom_info_to_db(logical_port_name, port_mapping, table, stop_event=threading.Event()):
+def post_port_dom_info_to_db(logical_port_name, port_mapping, table, stop_event=threading.Event(), dom_info_cache=None):
     ganged_port = False
     ganged_member_num = 1
 
@@ -396,7 +403,14 @@ def post_port_dom_info_to_db(logical_port_name, port_mapping, table, stop_event=
         ganged_member_num += 1
 
         try:
-            dom_info_dict = _wrapper_get_transceiver_dom_info(physical_port)
+            if dom_info_cache is not None and physical_port in dom_info_cache:
+                # If cache is enabled and dom information is in cache, just read from cache, no need read from EEPROM
+                dom_info_dict = dom_info_cache[physical_port]
+            else:
+                dom_info_dict = _wrapper_get_transceiver_dom_info(physical_port)
+                if dom_info_cache is not None:
+                    # If cache is enabled, put dom information to cache
+                    dom_info_cache[physical_port] = dom_info_dict
             if dom_info_dict is not None:
                 beautify_dom_info_dict(dom_info_dict, physical_port)
                 if _wrapper_get_sfp_type(physical_port) == 'QSFP_DD':
@@ -471,7 +485,7 @@ def post_port_sfp_dom_info_to_db(is_warm_start, port_mapping, stop_event=threadi
         # Get the asic to which this port belongs
         asic_index = port_mapping.get_asic_id_for_logical_port(logical_port_name)
         if asic_index is None:
-            logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
+            helper_logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
             continue
         post_port_sfp_info_to_db(logical_port_name, port_mapping, xcvr_table_helper.get_int_tbl(asic_index), transceiver_dict, stop_event)
         post_port_dom_info_to_db(logical_port_name, port_mapping, xcvr_table_helper.get_dom_tbl(asic_index), stop_event)
@@ -479,7 +493,7 @@ def post_port_sfp_dom_info_to_db(is_warm_start, port_mapping, stop_event=threadi
 
         # Do not notify media settings during warm reboot to avoid dataplane traffic impact
         if is_warm_start == False:
-            notify_media_setting(logical_port_name, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index))
+            notify_media_setting(logical_port_name, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index), port_mapping)
             transceiver_dict.clear()
 
 # Delete port dom/sfp info from db
@@ -770,7 +784,7 @@ def init_port_sfp_status_tbl(port_mapping, stop_event=threading.Event()):
         # Get the asic to which this port belongs
         asic_index = port_mapping.get_asic_id_for_logical_port(logical_port_name)
         if asic_index is None:
-            logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
+            helper_logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
             continue
 
         physical_port_list = port_mapping.logical_port_name_to_physical_port_list(logical_port_name)
@@ -804,23 +818,30 @@ class DomInfoUpdateTask(object):
     def task_worker(self, y_cable_presence):
         helper_logger.log_info("Start DOM monitoring loop")
         mux_tbl = {}
+        dom_info_cache = {}
+        dom_th_info_cache = {}
 
         # Start loop to update dom info in DB periodically
         while not self.task_stopping_event.wait(DOM_INFO_UPDATE_PERIOD_SECS):
+            # Clear the cache at the begin of the loop to make sure it will be clear each time
+            dom_info_cache.clear()
+            dom_th_info_cache.clear()
+
+            # Handle port change event from main thread
             self.handle_port_change_event()
             logical_port_list = self.port_mapping.logical_port_list
             for logical_port_name in logical_port_list:
                 # Get the asic to which this port belongs
                 asic_index = self.port_mapping.get_asic_id_for_logical_port(logical_port_name)
                 if asic_index is None:
-                    logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
+                    helper_logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
                     continue
 
                 if not sfp_status_helper.detect_port_in_error_status(logical_port_name, xcvr_table_helper.get_status_tbl(asic_index)):
-                    post_port_dom_info_to_db(logical_port_name, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index), self.task_stopping_event)
-                    post_port_dom_threshold_info_to_db(logical_port_name, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index), self.task_stopping_event)
+                    post_port_dom_info_to_db(logical_port_name, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index), self.task_stopping_event, dom_info_cache=dom_info_cache)
+                    post_port_dom_threshold_info_to_db(logical_port_name, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index), self.task_stopping_event, dom_th_info_cache=dom_th_info_cache)
                     if y_cable_presence[0] is True:
-                        y_cable_helper.check_identifier_presence_and_update_mux_info_entry(xcvr_table_helper.get_state_db(), mux_tbl, asic_index, logical_port_name)
+                        y_cable_helper.check_identifier_presence_and_update_mux_info_entry(xcvr_table_helper.get_state_db(asic_index), mux_tbl, asic_index, logical_port_name)
 
         helper_logger.log_info("Stop DOM monitoring loop")
 
@@ -836,19 +857,32 @@ class DomInfoUpdateTask(object):
         self.task_thread.join()
 
     def notify_port_change_event(self, port_change_event):
+        """Called by main thread. When main thread detects a port configuration add/remove, it puts an event to 
+           the event queue
+
+        Args:
+            port_change_event (object): port change event
+        """
         self.event_queue.put_nowait(port_change_event)
 
     def handle_port_change_event(self):
+        """Handle port change event until the queue is empty, update local port mapping and DB data accordingly. 
+        """
         while True:
             try:
                 port_change_event = self.event_queue.get_nowait()
-                self.port_mapping.handle_port_change_event(port_change_event)
                 if port_change_event.event_type == PortChangeEvent.PORT_REMOVE:
                     self.on_remove_logical_port(port_change_event)
+                self.port_mapping.handle_port_change_event(port_change_event)
             except queue.Empty:
                 break
 
     def on_remove_logical_port(self, port_change_event):
+        """Called when a logical port is removed from CONFIG_DB
+
+        Args:
+            port_change_event (object): port change event
+        """
         # To avoid race condition, remove the entry TRANSCEIVER_DOM_INFO table.
         # This thread only update TRANSCEIVER_DOM_INFO table, so we don't have to remove entries from
         # TRANSCEIVER_INFO and TRANSCEIVER_STATUS_INFO
@@ -870,10 +904,11 @@ class SfpStateUpdateTask(object):
         self.port_mapping = copy.deepcopy(port_mapping)
         # A set to hold those SFPs who fail to read EEPROM
         self.retry_eeprom_set = set()
+        # To avoid retry EEPROM read too fast, record the last EEPROM read timestamp in this member
+        self.last_retry_eeprom_time = 0
         # A dict to hold SFP error event, for SFP insert/remove event, it is not necessary to cache them
         # because _wrapper_get_presence returns the SFP presence status
         self.sfp_error_dict = {}
-        self.last_retry_eeprom_time = 0
 
     def _mapping_event_from_change_event(self, status, port_dict):
         """
@@ -973,10 +1008,9 @@ class SfpStateUpdateTask(object):
         timeout = RETRY_PERIOD_FOR_SYSTEM_READY_MSECS
         state = STATE_INIT
         while not stopping_event.is_set():
-            logical_port_event_dict = self.handle_port_change_event(event_queue)
-            if logical_port_event_dict:
-                y_cable_helper.change_ports_status_for_y_cable_change_event(
-                        logical_port_event_dict, y_cable_presence, stopping_event)
+            self.handle_port_change_event(event_queue, stopping_event, y_cable_presence)
+
+            # Retry those logical ports whose EEPROM reading failed or timeout when the SFP is inserted
             self.retry_eeprom_reading()
             next_state = state
             time_start = time.time()
@@ -1044,7 +1078,7 @@ class SfpStateUpdateTask(object):
                             # Get the asic to which this port belongs
                             asic_index = self.port_mapping.get_asic_id_for_logical_port(logical_port)
                             if asic_index is None:
-                                logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port))
+                                helper_logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port))
                                 continue
 
                             if value == sfp_status_helper.SFP_STATUS_INSERTED:
@@ -1066,7 +1100,7 @@ class SfpStateUpdateTask(object):
                                 if rc != SFP_EEPROM_NOT_READY:
                                     post_port_dom_info_to_db(logical_port, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index))
                                     post_port_dom_threshold_info_to_db(logical_port, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index))
-                                    notify_media_setting(logical_port, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index))
+                                    notify_media_setting(logical_port, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index), self.port_mapping)
                                     transceiver_dict.clear()
                             elif value == sfp_status_helper.SFP_STATUS_REMOVED:
                                 helper_logger.log_info("Got SFP removed event")
@@ -1097,7 +1131,7 @@ class SfpStateUpdateTask(object):
                                     if sfp_status_helper.is_error_block_eeprom_reading(error_bits):
                                         del_port_sfp_dom_info_from_db(logical_port, None, xcvr_table_helper.get_dom_tbl(asic_index))
                                 except (TypeError, ValueError) as e:
-                                    logger.log_error("Got unrecognized event {}, ignored".format(value))
+                                    helper_logger.log_error("Got unrecognized event {}, ignored".format(value))
 
                     # Since ports could be connected to a mux cable, if there is a change event process the change for being on a Y cable Port
                     y_cable_helper.change_ports_status_for_y_cable_change_event(
@@ -1153,24 +1187,47 @@ class SfpStateUpdateTask(object):
         os.kill(self.task_process.pid, signal.SIGKILL)
 
     def notify_port_change_event(self, port_change_event):
+        """Called by main thread. When main thread detects a port configuration add/remove, it puts an event to 
+           the event queue
+
+        Args:
+            port_change_event (object): port change event
+        """
         self.event_queue.put_nowait(port_change_event)
 
-    def handle_port_change_event(self, event_queue):
-        logical_port_event_dict = {}
+    def handle_port_change_event(self, event_queue, stopping_event, y_cable_presence):
+        """Handle port change event until the queue is empty, update local port mapping and DB data accordingly. 
+        """
         while True:
             try:
                 port_change_event = event_queue.get_nowait()
-                self.port_mapping.handle_port_change_event(port_change_event)
                 if port_change_event.event_type == PortChangeEvent.PORT_REMOVE:
                     self.on_remove_logical_port(port_change_event)
-                    logical_port_event_dict[port_change_event.port_name] = sfp_status_helper.SFP_STATUS_REMOVED
+                    # Update y_cable related database once a logical port is removed
+                    y_cable_helper.change_ports_status_for_y_cable_change_event(
+                        {port_change_event.port_name:sfp_status_helper.SFP_STATUS_REMOVED}, 
+                        self.port_mapping, 
+                        y_cable_presence, 
+                        stopping_event)
+                    self.port_mapping.handle_port_change_event(port_change_event)
                 elif port_change_event.event_type == PortChangeEvent.PORT_ADD:
-                    logical_port_event_dict.update(self.on_add_logical_port(port_change_event))
+                    self.port_mapping.handle_port_change_event(port_change_event)
+                    logical_port_event_dict = self.on_add_logical_port(port_change_event)
+                    # Update y_cable related database once a logical port is added
+                    y_cable_helper.change_ports_status_for_y_cable_change_event(
+                        logical_port_event_dict, 
+                        self.port_mapping, 
+                        y_cable_presence, 
+                        stopping_event)
             except queue.Empty:
                 break
-        return logical_port_event_dict
 
     def on_remove_logical_port(self, port_change_event):
+        """Called when a logical port is removed from CONFIG_DB.
+
+        Args:
+            port_change_event (object): port change event
+        """
         # To avoid race condition, remove the entry TRANSCEIVER_DOM_INFO, TRANSCEIVER_STATUS_INFO and TRANSCEIVER_INFO table.
         # The operation to remove entry from TRANSCEIVER_DOM_INFO is duplicate with DomInfoUpdateTask.on_remove_logical_port,
         # but it is necessary because TRANSCEIVER_DOM_INFO is also updated in this sub process when a new SFP is inserted.
@@ -1180,10 +1237,19 @@ class SfpStateUpdateTask(object):
                                       xcvr_table_helper.get_dom_tbl(port_change_event.asic_id))
         delete_port_from_status_table(port_change_event.port_name, xcvr_table_helper.get_status_tbl(port_change_event.asic_id))
 
+        # The logical port has been removed, no need retry EEPROM reading
         if port_change_event.port_name in self.retry_eeprom_set:
             self.retry_eeprom_set.remove(port_change_event.port_name)
 
     def on_add_logical_port(self, port_change_event):
+        """Called when a logical port is added
+
+        Args:
+            port_change_event (object): port change event
+
+        Returns:
+            dict: key is logical port name, value is SFP status
+        """
         # A logical port is created. There could be 3 cases:
         #  1. SFP information is already in DB, which means that a logical port with the same physical index is in DB before.
         #     Need copy the data from existing logical port and insert it into TRANSCEIVER_DOM_INFO, TRANSCEIVER_STATUS_INFO 
@@ -1260,7 +1326,7 @@ class SfpStateUpdateTask(object):
                 else:
                     post_port_dom_info_to_db(port_change_event.port_name, self.port_mapping, dom_tbl)
                     post_port_dom_threshold_info_to_db(port_change_event.port_name, self.port_mapping, dom_tbl)
-                    notify_media_setting(port_change_event.port_name, transceiver_dict, xcvr_table_helper.get_app_port_tbl(port_change_event.asic_id))
+                    notify_media_setting(port_change_event.port_name, transceiver_dict, xcvr_table_helper.get_app_port_tbl(port_change_event.asic_id), self.port_mapping)
             else:
                 status = sfp_status_helper.SFP_STATUS_REMOVED if not status else status
             logical_port_event_dict[port_change_event.port_name] = status
@@ -1268,6 +1334,8 @@ class SfpStateUpdateTask(object):
         return logical_port_event_dict
 
     def retry_eeprom_reading(self):
+        """Retry EEPROM reading, if retry succeed, remove the logical port from the retry set
+        """
         if not self.retry_eeprom_set:
             return
 
@@ -1287,9 +1355,10 @@ class SfpStateUpdateTask(object):
             if rc != SFP_EEPROM_NOT_READY:
                 post_port_dom_info_to_db(logical_port, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index))
                 post_port_dom_threshold_info_to_db(logical_port, self.port_mapping, xcvr_table_helper.get_dom_tbl(asic_index))
-                notify_media_setting(logical_port, self.port_mapping, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index))
+                notify_media_setting(logical_port, transceiver_dict, xcvr_table_helper.get_app_port_tbl(asic_index), self.port_mapping)
                 transceiver_dict.clear()
                 retry_success_set.add(logical_port)
+        # Update retry EEPROM set
         self.retry_eeprom_set -= retry_success_set
 
 
@@ -1343,6 +1412,8 @@ class DaemonXcvrd(daemon_base.DaemonBase):
                 break
 
     def handle_port_config_change(self):
+        """Select CONFIG_DB PORT table changes, once there is a port configuration add/remove, notify observers
+        """
         sel = swsscommon.Select()
         asic_context = {}
         namespaces = multi_asic.get_front_end_namespaces()
@@ -1354,38 +1425,56 @@ class DaemonXcvrd(daemon_base.DaemonBase):
             sel.addSelectable(sst)
 
         while not self.stop_event.is_set():
-            (state, sst) = sel.select(SELECT_TIMEOUT_MSECS)
+            (state, _) = sel.select(SELECT_TIMEOUT_MSECS)
             if state == swsscommon.Select.TIMEOUT:
                 continue
             if state != swsscommon.Select.OBJECT:
                 self.log_warning("sel.select() did not return swsscommon.Select.OBJECT")
                 continue
-            while True:
-                (key, op, fvp) = sst.pop()
-                if not key:
-                    break
-                if op == swsscommon.SET_COMMAND:
-                    # Only process new logical port, here we assume that the physical index for a logical port should
-                    # never change, if user configure a new value for the "index" field for exsitng locial port, it is 
-                    # an error
-                    if not self.port_mapping.is_logical_port(key):
-                        fvp = dict(fvp)
-                        port_change_event = PortChangeEvent(key, fvp['index'], asic_context[sst], PortChangeEvent.PORT_ADD)
-                        self.notify_port_change_event(port_change_event)
-                elif op == swsscommon.DEL_COMMAND:
-                    if self.port_mapping.is_logical_port(key):
-                        fvp = dict(fvp)
-                        port_change_event = PortChangeEvent(key, fvp['index'], asic_context[sst], PortChangeEvent.PORT_REMOVE)
-                        self.notify_port_change_event(port_change_event)
-                else:
-                    self.log_warning("Invalid DB operation: {}".format(op))
+            
+            for sst in asic_context.keys():
+                while True:
+                    (key, op, fvp) = sst.pop()
+                    if not key:
+                        break
+                    if op == swsscommon.SET_COMMAND:
+                        # Only process new logical port, here we assume that the physical index for a logical port should
+                        # never change, if user configure a new value for the "index" field for exsitng locial port, it is 
+                        # an error
+                        if not self.port_mapping.is_logical_port(key):
+                            fvp = dict(fvp)
+                            if 'index' in fvp:
+                                port_change_event = PortChangeEvent(key, fvp['index'], asic_context[sst], PortChangeEvent.PORT_ADD)
+                                self.notify_port_change_event(port_change_event)
+                    elif op == swsscommon.DEL_COMMAND:
+                        if self.port_mapping.is_logical_port(key):
+                            fvp = dict(fvp)
+                            port_change_event = PortChangeEvent(key, 
+                                                                self.port_mapping.get_logical_to_physical(key)[0], 
+                                                                asic_context[sst], 
+                                                                PortChangeEvent.PORT_REMOVE)
+                            self.notify_port_change_event(port_change_event)
+                    else:
+                        self.log_warning("Invalid DB operation: {}".format(op))
 
     def notify_port_change_event(self, port_change_event):
+        """Notify observers that there is a port change event
+
+        Args:
+            port_change_event (object): port change event
+        """
+        
+        self.log_notice('Sending port change event {} to observers'.format(port_change_event))
         for observer in self.port_change_event_observers:
             observer.notify_port_change_event(port_change_event)
         self.port_mapping.handle_port_change_event(port_change_event)
 
     def subscribe_port_change_event(self, observer):
+        """Subscribe port change event
+
+        Args:
+            observer (object): observer who listen to port change event
+        """
         self.port_change_event_observers.append(observer)
 
     def load_media_settings(self):
@@ -1401,6 +1490,8 @@ class DaemonXcvrd(daemon_base.DaemonBase):
             g_dict = json.load(media_file)
 
     def init_port_mapping(self):
+        """Initialize port mapping from CONFIG_DB for the first run
+        """
         namespaces = multi_asic.get_front_end_namespaces()
         for namespace in namespaces:
             asic_id = multi_asic.get_asic_index_from_namespace(namespace)
@@ -1485,7 +1576,7 @@ class DaemonXcvrd(daemon_base.DaemonBase):
             # Get the asic to which this port belongs
             asic_index = self.port_mapping.get_asic_id_for_logical_port(logical_port_name)
             if asic_index is None:
-                logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
+                helper_logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
                 continue
 
             del_port_sfp_dom_info_from_db(logical_port_name, self.port_mapping, xcvr_table_helper.get_int_tbl(asic_index), xcvr_table_helper.get_dom_tbl(asic_index))

@@ -490,13 +490,14 @@ class TestXcvrdScript(object):
         mock_table_helper.get_status_tbl = MagicMock(return_value=mock_table)
         mock_table_helper.get_int_tbl = MagicMock(return_value=mock_table)
         mock_table_helper.get_dom_tbl = MagicMock(return_value=mock_table)
+        stopping_event = multiprocessing.Event()
         port_mapping = PortMapping()
         task = SfpStateUpdateTask(port_mapping)
         port_change_event = PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_ADD)
         task.notify_port_change_event(port_change_event)
         wait_time = 5
         while wait_time > 0:
-            task.handle_port_change_event(task.event_queue)
+            task.handle_port_change_event(task.event_queue, stopping_event, [False])
             if task.port_mapping.logical_port_list:
                 break
             wait_time -= 1
@@ -510,7 +511,7 @@ class TestXcvrdScript(object):
         task.notify_port_change_event(port_change_event)
         wait_time = 5
         while wait_time > 0:
-            task.handle_port_change_event(task.event_queue)
+            task.handle_port_change_event(task.event_queue, stopping_event, [False])
             if not task.port_mapping.logical_port_list:
                 break
             wait_time -= 1
