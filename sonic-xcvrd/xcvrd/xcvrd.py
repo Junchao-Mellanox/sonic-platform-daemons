@@ -43,6 +43,7 @@ TRANSCEIVER_STATUS_TABLE = 'TRANSCEIVER_STATUS'
 SELECT_TIMEOUT_MSECS = 1000
 
 DOM_INFO_UPDATE_PERIOD_SECS = 60
+STATE_MACHINE_UPDATE_PERIOD_MSECS = 6000
 TIME_FOR_SFP_READY_SECS = 1
 
 EVENT_ON_ALL_SFP = '-1'
@@ -1170,7 +1171,7 @@ class SfpStateUpdateTask(object):
                 os.kill(os.getppid(), signal.SIGTERM)
                 break
             elif next_state == STATE_NORMAL:
-                timeout = 0
+                timeout = STATE_MACHINE_UPDATE_PERIOD_MSECS
 
         helper_logger.log_info("Stop SFP monitoring loop")
 
