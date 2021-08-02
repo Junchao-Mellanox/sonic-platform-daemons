@@ -3,7 +3,9 @@
     helper utlities configuring y_cable for xcvrd daemon
 """
 
+import copy
 import datetime
+import queue
 import threading
 
 from sonic_py_common import daemon_base, logger
@@ -11,6 +13,7 @@ from sonic_py_common import multi_asic
 from sonic_y_cable import y_cable
 from swsscommon import swsscommon
 from . import sfp_status_helper
+from .port_mapping import PortMapping
 
 
 SELECT_TIMEOUT = 1000
@@ -36,17 +39,6 @@ MUX_CABLE_STATIC_INFO_TABLE = "MUX_CABLE_STATIC_INFO"
 MUX_CABLE_INFO_TABLE = "MUX_CABLE_INFO"
 
 # Find out the underneath physical port list by logical name
-
-
-def logical_port_name_to_physical_port_list(port_name):
-    if port_name.startswith("Ethernet"):
-        if y_cable_platform_sfputil.is_logical_port(port_name):
-            return y_cable_platform_sfputil.get_logical_to_physical(port_name)
-        else:
-            helper_logger.log_error("Invalid port '%s'" % port_name)
-            return None
-    else:
-        return [int(port_name)]
 
 
 def _wrapper_get_presence(physical_port):
@@ -102,8 +94,8 @@ def y_cable_toggle_mux_torB(physical_port):
         return -1
 
 
-def update_tor_active_side(read_side, state, logical_port_name):
-    physical_port_list = logical_port_name_to_physical_port_list(
+def update_tor_active_side(read_side, state, logical_port_name, port_mapping):
+    physical_port_list = port_mapping.logical_port_name_to_physical_port_list(
         logical_port_name)
 
     if len(physical_port_list) == 1:
@@ -137,14 +129,14 @@ def update_tor_active_side(read_side, state, logical_port_name):
         return -1
 
 
-def update_appdb_port_mux_cable_response_table(logical_port_name, asic_index, appl_db, read_side):
+def update_appdb_port_mux_cable_response_table(logical_port_name, port_mapping, asic_index, appl_db, read_side):
 
     status = None
     y_cable_response_tbl = {}
 
     y_cable_response_tbl[asic_index] = swsscommon.Table(
         appl_db[asic_index], "MUX_CABLE_RESPONSE_TABLE")
-    physical_port_list = logical_port_name_to_physical_port_list(
+    physical_port_list = port_mapping.logical_port_name_to_physical_port_list(
         logical_port_name)
 
     if len(physical_port_list) == 1:
@@ -200,8 +192,8 @@ def update_appdb_port_mux_cable_response_table(logical_port_name, asic_index, ap
             "Error: Retreived multiple ports for a Y cable port {} while responding to command probe".format(logical_port_name))
 
 
-def read_y_cable_and_update_statedb_port_tbl(logical_port_name, mux_config_tbl):
-    physical_port_list = logical_port_name_to_physical_port_list(
+def read_y_cable_and_update_statedb_port_tbl(logical_port_name, port_mapping, mux_config_tbl):
+    physical_port_list = port_mapping.logical_port_name_to_physical_port_list(
         logical_port_name)
 
     read_side = None
@@ -259,7 +251,7 @@ def read_y_cable_and_update_statedb_port_tbl(logical_port_name, mux_config_tbl):
             "Error: Retreived multiple ports for a Y cable port {}".format(logical_port_name))
 
 
-def check_identifier_presence_and_update_mux_table_entry(state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, y_cable_presence):
+def check_identifier_presence_and_update_mux_table_entry(state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, port_mapping, y_cable_presence):
 
     (status, fvs) = port_tbl[asic_index].get(logical_port_name)
     if status is False:
@@ -280,9 +272,9 @@ def check_identifier_presence_and_update_mux_table_entry(state_db, port_tbl, y_c
                 if y_cable_presence[0] is True and y_cable_asic_table is not None and mux_asic_table is not None and static_mux_asic_table is not None:
                     # fill in the newly found entry
                     read_y_cable_and_update_statedb_port_tbl(
-                        logical_port_name, y_cable_tbl[asic_index])
-                    post_port_mux_info_to_db(logical_port_name,  mux_tbl[asic_index])
-                    post_port_mux_static_info_to_db(logical_port_name,  static_tbl[asic_index])
+                        logical_port_name, port_mapping, y_cable_tbl[asic_index])
+                    post_port_mux_info_to_db(logical_port_name,  port_mapping, mux_tbl[asic_index])
+                    post_port_mux_static_info_to_db(logical_port_name,  port_mapping, static_tbl[asic_index])
 
                 else:
                     # first create the state db y cable table and then fill in the entry
@@ -299,9 +291,9 @@ def check_identifier_presence_and_update_mux_table_entry(state_db, port_tbl, y_c
                         mux_tbl[asic_id] = swsscommon.Table(state_db[asic_id], MUX_CABLE_INFO_TABLE)
                     # fill the newly found entry
                     read_y_cable_and_update_statedb_port_tbl(
-                        logical_port_name, y_cable_tbl[asic_index])
-                    post_port_mux_info_to_db(logical_port_name,  mux_tbl[asic_index])
-                    post_port_mux_static_info_to_db(logical_port_name,  static_tbl[asic_index])
+                        logical_port_name, port_mapping, y_cable_tbl[asic_index])
+                    post_port_mux_info_to_db(logical_port_name,  port_mapping, mux_tbl[asic_index])
+                    post_port_mux_static_info_to_db(logical_port_name,  port_mapping, static_tbl[asic_index])
             else:
                 helper_logger.log_warning(
                     "Could not retreive active or auto value for state kvp for {}, inside MUX_CABLE table".format(logical_port_name))
@@ -348,7 +340,7 @@ def check_identifier_presence_and_delete_mux_table_entry(state_db, port_tbl, asi
                 delete_change_event[:] = [True]
 
 
-def init_ports_status_for_y_cable(platform_sfp, platform_chassis, y_cable_presence, stop_event=threading.Event()):
+def init_ports_status_for_y_cable(platform_sfp, platform_chassis, y_cable_presence, port_mapping, stop_event=threading.Event()):
     global y_cable_platform_sfputil
     global y_cable_platform_chassis
     # Connect to CONFIG_DB and create port status table inside state_db
@@ -372,13 +364,13 @@ def init_ports_status_for_y_cable(platform_sfp, platform_chassis, y_cable_presen
         xcvrd_log_tbl[asic_id].set("Y_CABLE", fvs_updated )
 
     # Init PORT_STATUS table if ports are on Y cable
-    logical_port_list = y_cable_platform_sfputil.logical
+    logical_port_list = port_mapping.logical_port_list
     for logical_port_name in logical_port_list:
         if stop_event.is_set():
             break
 
         # Get the asic to which this port belongs
-        asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(
+        asic_index = port_mapping.get_asic_id_for_logical_port(
             logical_port_name)
         if asic_index is None:
             helper_logger.log_warning(
@@ -387,7 +379,7 @@ def init_ports_status_for_y_cable(platform_sfp, platform_chassis, y_cable_presen
 
         if logical_port_name in port_table_keys[asic_index]:
             check_identifier_presence_and_update_mux_table_entry(
-                state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, y_cable_presence)
+                state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, port_mapping, y_cable_presence)
         else:
             # This port does not exist in Port table of config but is present inside
             # logical_ports after loading the port_mappings from port_config_file
@@ -396,7 +388,7 @@ def init_ports_status_for_y_cable(platform_sfp, platform_chassis, y_cable_presen
                 "Could not retreive port inside config_db PORT table ".format(logical_port_name))
 
 
-def change_ports_status_for_y_cable_change_event(port_dict, y_cable_presence, stop_event=threading.Event()):
+def change_ports_status_for_y_cable_change_event(logical_port_dict, port_mapping, y_cable_presence, stop_event=threading.Event()):
     # Connect to CONFIG_DB and create port status table inside state_db
     config_db, state_db, port_tbl, y_cable_tbl = {}, {}, {}, {}
     static_tbl, mux_tbl = {}, {}
@@ -413,43 +405,35 @@ def change_ports_status_for_y_cable_change_event(port_dict, y_cable_presence, st
         port_table_keys[asic_id] = port_tbl[asic_id].getKeys()
 
     # Init PORT_STATUS table if ports are on Y cable and an event is received
-    for key, value in port_dict.items():
-        if stop_event.is_set():
-            break
-        logical_port_list = y_cable_platform_sfputil.get_physical_to_logical(int(key))
-        if logical_port_list is None:
-            helper_logger.log_warning("Got unknown FP port index {}, ignored".format(key))
+    for logical_port_name, value in logical_port_dict.items():
+        # Get the asic to which this port belongs
+        asic_index = port_mapping.get_asic_id_for_logical_port(logical_port_name)
+        if asic_index is None:
+            helper_logger.log_warning(
+                "Got invalid asic index for {}, ignored".format(logical_port_name))
             continue
-        for logical_port_name in logical_port_list:
 
-            # Get the asic to which this port belongs
-            asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(logical_port_name)
-            if asic_index is None:
-                helper_logger.log_warning(
-                    "Got invalid asic index for {}, ignored".format(logical_port_name))
+        if logical_port_name in port_table_keys[asic_index]:
+            if value == sfp_status_helper.SFP_STATUS_INSERTED:
+                helper_logger.log_info("Got SFP inserted event")
+                check_identifier_presence_and_update_mux_table_entry(
+                    state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, port_mapping, y_cable_presence)
+            elif value == sfp_status_helper.SFP_STATUS_REMOVED:
+                check_identifier_presence_and_delete_mux_table_entry(
+                    state_db, port_tbl, asic_index, logical_port_name, y_cable_presence, delete_change_event)
+
+            else:
+                try:
+                    # Now that the value is in bitmap format, let's convert it to number
+                    event_bits = int(value)
+                    if sfp_status_helper.is_error_block_eeprom_reading(event_bits):
+                        check_identifier_presence_and_delete_mux_table_entry(
+                            state_db, port_tbl, asic_index, logical_port_name, y_cable_presence, delete_change_event)
+                except:
+                    pass
+                # SFP return unkown event, just ignore for now.
+                helper_logger.log_warning("Got unknown event {}, ignored".format(value))
                 continue
-
-            if logical_port_name in port_table_keys[asic_index]:
-                if value == sfp_status_helper.SFP_STATUS_INSERTED:
-                    helper_logger.log_info("Got SFP inserted event")
-                    check_identifier_presence_and_update_mux_table_entry(
-                        state_db, port_tbl, y_cable_tbl, static_tbl, mux_tbl, asic_index, logical_port_name, y_cable_presence)
-                elif value == sfp_status_helper.SFP_STATUS_REMOVED:
-                    check_identifier_presence_and_delete_mux_table_entry(
-                        state_db, port_tbl, asic_index, logical_port_name, y_cable_presence, delete_change_event)
-
-                else:
-                    try:
-                        # Now that the value is in bitmap format, let's convert it to number
-                        event_bits = int(value)
-                        if sfp_status_helper.is_error_block_eeprom_reading(event_bits):
-                            check_identifier_presence_and_delete_mux_table_entry(
-                                state_db, port_tbl, asic_index, logical_port_name, y_cable_presence, delete_change_event)
-                    except:
-                        pass
-                    # SFP return unkown event, just ignore for now.
-                    helper_logger.log_warning("Got unknown event {}, ignored".format(value))
-                    continue
 
     # If there was a delete event and y_cable_presence was true, reaccess the y_cable presence
     if y_cable_presence[0] is True and delete_change_event[0] is True:
@@ -466,7 +450,7 @@ def change_ports_status_for_y_cable_change_event(port_dict, y_cable_presence, st
                 break
 
 
-def delete_ports_status_for_y_cable():
+def delete_ports_status_for_y_cable(port_mapping):
 
     state_db, port_tbl, y_cable_tbl = {}, {}, {}
     y_cable_tbl_keys = {}
@@ -482,11 +466,11 @@ def delete_ports_status_for_y_cable():
         mux_tbl[asic_id] = swsscommon.Table(state_db[asic_id], MUX_CABLE_INFO_TABLE)
 
     # delete PORTS on Y cable table if ports on Y cable
-    logical_port_list = y_cable_platform_sfputil.logical
+    logical_port_list = port_mapping.logical_port_list
     for logical_port_name in logical_port_list:
 
         # Get the asic to which this port belongs
-        asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(
+        asic_index = port_mapping.get_asic_id_for_logical_port(
             logical_port_name)
         if asic_index is None:
             logger.log_warning(
@@ -501,7 +485,7 @@ def delete_ports_status_for_y_cable():
                 logical_port_name, mux_tbl[asic_index])
 
 
-def check_identifier_presence_and_update_mux_info_entry(state_db, mux_tbl, asic_index, logical_port_name):
+def check_identifier_presence_and_update_mux_info_entry(state_db, mux_tbl, asic_index, logical_port_name, port_mapping):
 
     # Get the namespaces in the platform
     config_db, port_tbl = {}, {}
@@ -527,7 +511,7 @@ def check_identifier_presence_and_update_mux_info_entry(state_db, mux_tbl, asic_
 
                 if mux_tbl.get(asic_index, None) is not None:
                     # fill in the newly found entry
-                    post_port_mux_info_to_db(logical_port_name,  mux_tbl[asic_index])
+                    post_port_mux_info_to_db(logical_port_name, port_mapping, mux_tbl[asic_index])
 
                 else:
                     # first create the state db y cable table and then fill in the entry
@@ -537,7 +521,7 @@ def check_identifier_presence_and_update_mux_info_entry(state_db, mux_tbl, asic_
                             namespace)
                         mux_tbl[asic_id] = swsscommon.Table(state_db[asic_id], MUX_CABLE_INFO_TABLE)
                     # fill the newly found entry
-                    post_port_mux_info_to_db(logical_port_name,  mux_tbl[asic_index])
+                    post_port_mux_info_to_db(logical_port_name, port_mapping, mux_tbl[asic_index])
             else:
                 helper_logger.log_warning(
                     "Could not retreive active or auto value for state kvp for {}, inside MUX_CABLE table".format(logical_port_name))
@@ -558,7 +542,7 @@ def get_firmware_dict(physical_port, target, side, mux_info_dict):
         mux_info_dict[("version_{}_next".format(side))] = "N/A"
 
 
-def get_muxcable_info(physical_port, logical_port_name):
+def get_muxcable_info(physical_port, logical_port_name, port_mapping):
 
     mux_info_dict = {}
     y_cable_tbl, state_db = {}, {}
@@ -570,7 +554,7 @@ def get_muxcable_info(physical_port, logical_port_name):
         y_cable_tbl[asic_id] = swsscommon.Table(
             state_db[asic_id], swsscommon.STATE_HW_MUX_CABLE_TABLE_NAME)
 
-    asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(
+    asic_index = port_mapping.get_asic_id_for_logical_port(
         logical_port_name)
     if asic_index is None:
         helper_logger.log_warning(
@@ -735,7 +719,7 @@ def get_muxcable_info(physical_port, logical_port_name):
     return mux_info_dict
 
 
-def get_muxcable_static_info(physical_port, logical_port_name):
+def get_muxcable_static_info(physical_port, logical_port_name, port_mapping):
 
     mux_static_info_dict = {}
     y_cable_tbl, state_db = {}, {}
@@ -747,7 +731,7 @@ def get_muxcable_static_info(physical_port, logical_port_name):
         y_cable_tbl[asic_id] = swsscommon.Table(
             state_db[asic_id], swsscommon.STATE_HW_MUX_CABLE_TABLE_NAME)
 
-    asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(
+    asic_index = port_mapping.get_asic_id_for_logical_port(
         logical_port_name)
     if asic_index is None:
         helper_logger.log_warning(
@@ -828,9 +812,9 @@ def get_muxcable_static_info(physical_port, logical_port_name):
     return mux_static_info_dict
 
 
-def post_port_mux_info_to_db(logical_port_name, table):
+def post_port_mux_info_to_db(logical_port_name, port_mapping, table):
 
-    physical_port_list = logical_port_name_to_physical_port_list(logical_port_name)
+    physical_port_list = port_mapping.logical_port_name_to_physical_port_list(logical_port_name)
     if physical_port_list is None:
         helper_logger.log_error("No physical ports found for logical port '{}'".format(logical_port_name))
         return -1
@@ -847,7 +831,7 @@ def post_port_mux_info_to_db(logical_port_name, table):
                 "Error: trying to post mux info without presence of port {}".format(logical_port_name))
             continue
 
-        mux_info_dict = get_muxcable_info(physical_port, logical_port_name)
+        mux_info_dict = get_muxcable_info(physical_port, logical_port_name, port_mapping)
         if mux_info_dict is not None and mux_info_dict is not -1:
             #transceiver_dict[physical_port] = port_info_dict
             fvs = swsscommon.FieldValuePairs(
@@ -887,9 +871,9 @@ def post_port_mux_info_to_db(logical_port_name, table):
             return -1
 
 
-def post_port_mux_static_info_to_db(logical_port_name, static_table):
+def post_port_mux_static_info_to_db(logical_port_name, port_mapping, static_table):
 
-    physical_port_list = logical_port_name_to_physical_port_list(logical_port_name)
+    physical_port_list = port_mapping.logical_port_name_to_physical_port_list(logical_port_name)
     if physical_port_list is None:
         helper_logger.log_error("No physical ports found for logical port '{}'".format(logical_port_name))
         return -1
@@ -904,7 +888,7 @@ def post_port_mux_static_info_to_db(logical_port_name, static_table):
         if not _wrapper_get_presence(physical_port):
             continue
 
-        mux_static_info_dict = get_muxcable_static_info(physical_port, logical_port_name)
+        mux_static_info_dict = get_muxcable_static_info(physical_port, logical_port_name, port_mapping)
 
         if mux_static_info_dict is not None and mux_static_info_dict is not -1:
             #transceiver_dict[physical_port] = port_info_dict
@@ -946,7 +930,7 @@ def post_port_mux_static_info_to_db(logical_port_name, static_table):
             return -1
 
 
-def post_mux_static_info_to_db(is_warm_start, stop_event=threading.Event()):
+def post_mux_static_info_to_db(is_warm_start, port_mapping, stop_event=threading.Event()):
     # Connect to STATE_DB and create transceiver mux/static info tables
     state_db, static_tbl = {}, {}
 
@@ -958,20 +942,20 @@ def post_mux_static_info_to_db(is_warm_start, stop_event=threading.Event()):
         static_tbl[asic_id] = swsscommon.Table(state_db[asic_id], MUX_CABLE_STATIC_INFO_TABLE)
 
     # Post all the current interface dom/sfp info to STATE_DB
-    logical_port_list = y_cable_platform_sfputil.logical
+    logical_port_list = port_mapping.logical_port_list
     for logical_port_name in logical_port_list:
         if stop_event.is_set():
             break
 
         # Get the asic to which this port belongs
-        asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(logical_port_name)
+        asic_index = port_mapping.get_asic_id_for_logical_port(logical_port_name)
         if asic_index is None:
             logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
             continue
-        post_port_mux_static_info_to_db(logical_port_name, mux_tbl[asic_index])
+        post_port_mux_static_info_to_db(logical_port_name, port_mapping, mux_tbl[asic_index])
 
 
-def post_mux_info_to_db(is_warm_start, stop_event=threading.Event()):
+def post_mux_info_to_db(is_warm_start, port_mapping, stop_event=threading.Event()):
     # Connect to STATE_DB and create transceiver mux/static info tables
     state_db, mux_tbl, static_tbl = {}, {}, {}
 
@@ -983,27 +967,40 @@ def post_mux_info_to_db(is_warm_start, stop_event=threading.Event()):
         mux_tbl[asic_id] = swsscommon.Table(state_db[asic_id], MUX_CABLE_INFO_TABLE)
 
     # Post all the current interface dom/sfp info to STATE_DB
-    logical_port_list = y_cable_platform_sfputil.logical
+    logical_port_list = port_mapping.logical_port_list
     for logical_port_name in logical_port_list:
         if stop_event.is_set():
             break
 
         # Get the asic to which this port belongs
-        asic_index = y_cable_platform_sfputil.get_asic_id_for_logical_port(logical_port_name)
+        asic_index = port_mapping.get_asic_id_for_logical_port(logical_port_name)
         if asic_index is None:
             logger.log_warning("Got invalid asic index for {}, ignored".format(logical_port_name))
             continue
-        post_port_mux_info_to_db(logical_port_name,  mux_tbl[asic_index])
+        post_port_mux_info_to_db(logical_port_name,  port_mapping, mux_tbl[asic_index])
 
 
 # Thread wrapper class to update y_cable status periodically
 class YCableTableUpdateTask(object):
-    def __init__(self):
+    def __init__(self, port_mapping):
         self.task_thread = None
+        self.event_queue = queue.Queue()
+        self.port_mapping = copy.deepcopy(port_mapping)
 
         if multi_asic.is_multi_asic():
             # Load the namespace details first from the database_global.json file.
             swsscommon.SonicDBConfig.initializeGlobalConfig()
+
+    def notify_port_change_event(self, port_change_event):
+        self.event_queue.put_nowait(port_change_event)
+
+    def handle_port_change_event(self):
+        while True:
+            try:
+                port_change_event = self.event_queue.get_nowait()
+                self.port_mapping.handle_port_change_event(port_change_event)
+            except queue.Empty:
+                break
 
     def task_worker(self):
 
@@ -1062,6 +1059,7 @@ class YCableTableUpdateTask(object):
             # Get the corresponding namespace from redisselect db connector object
             namespace = redisSelectObj.getDbConnector().getNamespace()
             asic_index = multi_asic.get_asic_index_from_namespace(namespace)
+            self.handle_port_change_event()
 
             while True:
                 (port, op, fvp) = status_tbl[asic_index].pop()
@@ -1096,7 +1094,7 @@ class YCableTableUpdateTask(object):
                         read_side = mux_port_dict.get("read_side")
                         # Now whatever is the state requested, toggle the mux appropriately
                         helper_logger.log_debug("Y_CABLE_DEBUG: xcvrd trying to transition port {} from {} to {}".format(port, old_status, new_status))
-                        active_side = update_tor_active_side(read_side, new_status, port)
+                        active_side = update_tor_active_side(read_side, new_status, port, self.port_mapping)
                         if active_side == -1:
                             helper_logger.log_warning("ERR: Got a change event for toggle but could not toggle the mux-direction for port {} state from {} to {}, writing unknown".format(
                                 port, old_status, new_status))
@@ -1144,7 +1142,7 @@ class YCableTableUpdateTask(object):
                                 continue
                             mux_port_dict = dict(fv)
                             read_side = mux_port_dict.get("read_side")
-                            update_appdb_port_mux_cable_response_table(port_m, asic_index, appl_db, int(read_side))
+                            update_appdb_port_mux_cable_response_table(port_m, self.port_mapping, asic_index, appl_db, int(read_side))
 
             while True:
                 (key, op_m, fvp_m) = xcvrd_log_tbl[asic_index].pop()
