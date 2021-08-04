@@ -597,6 +597,7 @@ class TestXcvrdScript(object):
 
     @patch('time.sleep', MagicMock())
     @patch('xcvrd.xcvrd.xcvr_table_helper', MagicMock())
+    @patch('xcvrd.xcvrd._wrapper_soak_sfp_insert_event', MagicMock())
     @patch('os.kill')
     @patch('xcvrd.xcvrd.SfpStateUpdateTask._mapping_event_from_change_event')
     @patch('xcvrd.xcvrd._wrapper_get_transceiver_change_event')
