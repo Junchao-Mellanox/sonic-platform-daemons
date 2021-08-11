@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 if sys.version_info >= (3, 3):
     from unittest.mock import MagicMock, patch
@@ -27,7 +28,6 @@ os.environ["XCVRD_UNIT_TESTING"] = "1"
 from xcvrd.xcvrd import *
 from xcvrd.xcvrd_utilities.y_cable_helper import *
 from xcvrd.xcvrd_utilities.sfp_status_helper import *
-
 
 class TestXcvrdScript(object):
 
@@ -572,6 +572,7 @@ class TestXcvrdScript(object):
 
     @patch('time.sleep', MagicMock())
     @patch('xcvrd.xcvrd.xcvr_table_helper', MagicMock())
+    @patch('xcvrd.xcvrd._wrapper_soak_sfp_insert_event', MagicMock())
     @patch('os.kill')
     @patch('xcvrd.xcvrd.SfpStateUpdateTask._mapping_event_from_change_event')
     @patch('xcvrd.xcvrd._wrapper_get_transceiver_change_event')
@@ -747,6 +748,32 @@ class TestXcvrdScript(object):
         assert mock_updata_status.call_count == 1
         mock_updata_status.assert_called_with('Ethernet0', status_tbl, task.sfp_error_dict[1][0], 'Blocking EEPROM from being read|Power budget exceeded')
 
+    def test_sfp_insert_events(self):
+        from xcvrd.xcvrd import _wrapper_soak_sfp_insert_event
+        sfp_insert_events = {}
+        insert = port_dict = {1:'1', 2:'1', 3:'1', 4:'1', 5:'1'}
+        start = time.time()
+        while True:
+            _wrapper_soak_sfp_insert_event(sfp_insert_events, insert)
+            assert not bool(insert)
+            if time.time() - start > MGMT_INIT_TIME_DELAY_SECS:
+                break
+        assert insert == port_dict
+
+    def test_sfp_remove_events(self):
+        from xcvrd.xcvrd import _wrapper_soak_sfp_insert_event
+        sfp_insert_events = {}
+        insert = {1:'1', 2:'1', 3:'1', 4:'1', 5:'1'}
+        removal = {1:'0', 2:'0', 3:'0', 4:'0', 5:'0'}
+        port_dict = {1:'0', 2:'0', 3:'0', 4:'0', 5:'0'}
+        for x in range(5):
+            _wrapper_soak_sfp_insert_event(sfp_insert_events, insert)
+            time.sleep(1)
+            _wrapper_soak_sfp_insert_event(sfp_insert_events, removal)
+
+        assert port_dict == removal
+
+
 def wait_until(total_wait_time, interval, call_back, *args, **kwargs):
     wait_time = 0
     while wait_time <= total_wait_time:
@@ -758,4 +785,3 @@ def wait_until(total_wait_time, interval, call_back, *args, **kwargs):
         time.sleep(interval)
         wait_time += interval
     return False
-

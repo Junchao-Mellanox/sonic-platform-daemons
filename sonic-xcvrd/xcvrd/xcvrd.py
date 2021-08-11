@@ -42,6 +42,12 @@ TRANSCEIVER_STATUS_TABLE = 'TRANSCEIVER_STATUS'
 
 SELECT_TIMEOUT_MSECS = 1000
 
+# Mgminit time required as per CMIS spec
+MGMT_INIT_TIME_DELAY_SECS = 2
+
+# SFP insert event poll duration
+SFP_INSERT_EVENT_POLL_PERIOD_MSECS = 1000
+
 DOM_INFO_UPDATE_PERIOD_SECS = 60
 STATE_MACHINE_UPDATE_PERIOD_MSECS = 6000
 TIME_FOR_SFP_READY_SECS = 1
@@ -160,6 +166,20 @@ def _wrapper_get_transceiver_dom_threshold_info(physical_port):
             pass
     return platform_sfputil.get_transceiver_dom_threshold_info_dict(physical_port)
 
+# Soak SFP insert event until management init completes
+def _wrapper_soak_sfp_insert_event(sfp_insert_events, port_dict):
+    for key, value in list(port_dict.items()):
+        if value == sfp_status_helper.SFP_STATUS_INSERTED:
+            sfp_insert_events[key] = time.time()
+            del port_dict[key]
+        elif value == sfp_status_helper.SFP_STATUS_REMOVED:
+            if key in sfp_insert_events:
+                del sfp_insert_events[key]
+
+    for key, itime in list(sfp_insert_events.items()):
+        if time.time() - itime >= MGMT_INIT_TIME_DELAY_SECS:
+            port_dict[key] = sfp_status_helper.SFP_STATUS_INSERTED
+            del sfp_insert_events[key]
 
 def _wrapper_get_transceiver_change_event(timeout):
     if platform_chassis is not None:
@@ -190,8 +210,8 @@ def _wrapper_get_sfp_error_description(physical_port):
         except NotImplementedError:
             pass
     return None
-# Remove unnecessary unit from the raw data
 
+# Remove unnecessary unit from the raw data
 
 def beautify_dom_info_dict(dom_info_dict, physical_port):
     dom_info_dict['temperature'] = strip_unit_and_beautify(dom_info_dict['temperature'], TEMP_UNIT)
@@ -293,9 +313,9 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
                      ('ext_identifier', port_info_dict['ext_identifier']),
                      ('ext_rateselect_compliance', port_info_dict['ext_rateselect_compliance']),
                      ('cable_type', port_info_dict['cable_type']),
-                     ('cable_length', port_info_dict['cable_length']),
+                     ('cable_length', str(port_info_dict['cable_length'])),
                      ('specification_compliance', port_info_dict['specification_compliance']),
-                     ('nominal_bit_rate', port_info_dict['nominal_bit_rate']),
+                     ('nominal_bit_rate', str(port_info_dict['nominal_bit_rate'])),
                      ('application_advertisement', port_info_dict['application_advertisement']
                       if 'application_advertisement' in port_info_dict else 'N/A'),
                      ('is_replaceable', str(is_replaceable)),
@@ -910,6 +930,7 @@ class SfpStateUpdateTask(object):
         # A dict to hold SFP error event, for SFP insert/remove event, it is not necessary to cache them
         # because _wrapper_get_presence returns the SFP presence status
         self.sfp_error_dict = {}
+        self.sfp_insert_events = {}
 
     def _mapping_event_from_change_event(self, status, port_dict):
         """
@@ -1015,7 +1036,13 @@ class SfpStateUpdateTask(object):
             self.retry_eeprom_reading()
             next_state = state
             time_start = time.time()
+            # Ensure not to block for any event if sfp insert event is pending
+            if self.sfp_insert_events:
+                timeout = SFP_INSERT_EVENT_POLL_PERIOD_MSECS
             status, port_dict, error_dict = _wrapper_get_transceiver_change_event(timeout)
+            if status:
+                # Soak SFP insert events across various ports (updates port_dict)
+                _wrapper_soak_sfp_insert_event(self.sfp_insert_events, port_dict)
             if not port_dict:
                 continue
             helper_logger.log_debug("Got event {} {} in state {}".format(status, port_dict, state))
