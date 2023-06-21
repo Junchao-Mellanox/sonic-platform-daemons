@@ -32,6 +32,8 @@ try:
     
     from sonic_platform_base.sonic_xcvr.api.public.c_cmis import CmisApi
 
+    from .sff_mgr import SffManagerTask
+    from .xcvrd_utilities.xcvr_table_helper import XcvrTableHelper
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
@@ -43,12 +45,6 @@ SYSLOG_IDENTIFIER = "xcvrd"
 
 PLATFORM_SPECIFIC_MODULE_NAME = "sfputil"
 PLATFORM_SPECIFIC_CLASS_NAME = "SfpUtil"
-
-TRANSCEIVER_INFO_TABLE = 'TRANSCEIVER_INFO'
-TRANSCEIVER_DOM_SENSOR_TABLE = 'TRANSCEIVER_DOM_SENSOR'
-TRANSCEIVER_DOM_THRESHOLD_TABLE = 'TRANSCEIVER_DOM_THRESHOLD'
-TRANSCEIVER_STATUS_TABLE = 'TRANSCEIVER_STATUS'
-TRANSCEIVER_PM_TABLE = 'TRANSCEIVER_PM'
 
 TRANSCEIVER_STATUS_TABLE_SW_FIELDS = ["status", "error"]
 
@@ -91,6 +87,12 @@ TEMP_UNIT = 'C'
 VOLT_UNIT = 'Volts'
 POWER_UNIT = 'dBm'
 BIAS_UNIT = 'mA'
+
+USR_SHARE_SONIC_PATH = "/usr/share/sonic"
+HOST_DEVICE_PATH = USR_SHARE_SONIC_PATH + "/device"
+CONTAINER_PLATFORM_PATH = USR_SHARE_SONIC_PATH + "/platform"
+PLATFORM_PMON_CTRL_FILENAME = "pmon_daemon_control.json"
+ENABLE_SFF_MGR_FLAG_NAME = "enable_xcvrd_sff_mgr"
 
 g_dict = {}
 # Global platform specific sfputil class instance
@@ -2188,6 +2190,7 @@ class DaemonXcvrd(daemon_base.DaemonBase):
         self.stop_event = threading.Event()
         self.sfp_error_event = threading.Event()
         self.skip_cmis_mgr = skip_cmis_mgr
+        self.enable_sff_mgr = False
         self.namespaces = ['']
         self.threads = []
 
@@ -2306,6 +2309,46 @@ class DaemonXcvrd(daemon_base.DaemonBase):
 
         del globals()['platform_chassis']
 
+    def load_feature_flags(self):
+        """
+        Load feature enable/skip flags from platform files.
+        """
+        platform_pmon_ctrl_file_path = self.get_platform_pmon_ctrl_file_path()
+        if platform_pmon_ctrl_file_path is not None:
+            # Load the JSON file
+            with open(platform_pmon_ctrl_file_path) as file:
+                data = json.load(file)
+                if ENABLE_SFF_MGR_FLAG_NAME in data:
+                    enable_sff_mgr = data[ENABLE_SFF_MGR_FLAG_NAME]
+                    self.enable_sff_mgr = isinstance(enable_sff_mgr, bool) and enable_sff_mgr
+
+    def get_platform_pmon_ctrl_file_path(self):
+        """
+        Get the platform PMON control file path.
+
+        The method generates a list of potential file paths, prioritizing the container platform path.
+        It then checks these paths in order to find an existing file.
+
+        Returns:
+            str: The first found platform PMON control file path.
+            None: If no file path exists.
+        """
+        platform_env_conf_path_candidates = []
+
+        platform_env_conf_path_candidates.append(
+            os.path.join(CONTAINER_PLATFORM_PATH, PLATFORM_PMON_CTRL_FILENAME))
+
+        platform = device_info.get_platform()
+        if platform:
+            platform_env_conf_path_candidates.append(
+                os.path.join(HOST_DEVICE_PATH, platform, PLATFORM_PMON_CTRL_FILENAME))
+
+        for platform_env_conf_file_path in platform_env_conf_path_candidates:
+            if os.path.isfile(platform_env_conf_file_path):
+                return platform_env_conf_file_path
+
+        return None
+
     # Run daemon
 
     def run(self):
@@ -2313,6 +2356,16 @@ class DaemonXcvrd(daemon_base.DaemonBase):
 
         # Start daemon initialization sequence
         port_mapping_data = self.init()
+
+        self.load_feature_flags()
+        # Start the SFF manager
+        sff_manager = None
+        if self.enable_sff_mgr:
+            sff_manager = SffManagerTask(self.namespaces, self.stop_event, platform_chassis, helper_logger)
+            sff_manager.start()
+            self.threads.append(sff_manager)
+        else:
+            self.log_notice("Skipping SFF Task Manager")
 
         # Start the CMIS manager
         cmis_manager = CmisManagerTask(self.namespaces, port_mapping_data, self.stop_event, self.skip_cmis_mgr)
@@ -2353,6 +2406,11 @@ class DaemonXcvrd(daemon_base.DaemonBase):
             self.log_error("Exiting main loop as child thread raised exception!")
             os.kill(os.getpid(), signal.SIGKILL)
 
+        # Stop the SFF manager
+        if sff_manager is not None:
+            if sff_manager.is_alive():
+                sff_manager.join()
+
         # Stop the CMIS manager
         if cmis_manager is not None:
             if cmis_manager.is_alive():
@@ -2375,53 +2433,6 @@ class DaemonXcvrd(daemon_base.DaemonBase):
         if self.sfp_error_event.is_set():
             sys.exit(SFP_SYSTEM_ERROR)
 
-
-class XcvrTableHelper:
-    def __init__(self, namespaces):
-        self.int_tbl, self.dom_tbl, self.dom_threshold_tbl, self.status_tbl, self.app_port_tbl, \
-		self.cfg_port_tbl, self.state_port_tbl, self.pm_tbl = {}, {}, {}, {}, {}, {}, {}, {}
-        self.state_db = {}
-        self.cfg_db = {}
-        for namespace in namespaces:
-            asic_id = multi_asic.get_asic_index_from_namespace(namespace)
-            self.state_db[asic_id] = daemon_base.db_connect("STATE_DB", namespace)
-            self.int_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], TRANSCEIVER_INFO_TABLE)
-            self.dom_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], TRANSCEIVER_DOM_SENSOR_TABLE)
-            self.dom_threshold_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], TRANSCEIVER_DOM_THRESHOLD_TABLE)
-            self.status_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], TRANSCEIVER_STATUS_TABLE)
-            self.pm_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], TRANSCEIVER_PM_TABLE)
-            self.state_port_tbl[asic_id] = swsscommon.Table(self.state_db[asic_id], swsscommon.STATE_PORT_TABLE_NAME)
-            appl_db = daemon_base.db_connect("APPL_DB", namespace)
-            self.app_port_tbl[asic_id] = swsscommon.ProducerStateTable(appl_db, swsscommon.APP_PORT_TABLE_NAME)
-            self.cfg_db[asic_id] = daemon_base.db_connect("CONFIG_DB", namespace)
-            self.cfg_port_tbl[asic_id] = swsscommon.Table(self.cfg_db[asic_id], swsscommon.CFG_PORT_TABLE_NAME)
-
-    def get_intf_tbl(self, asic_id):
-        return self.int_tbl[asic_id]
-
-    def get_dom_tbl(self, asic_id):
-        return self.dom_tbl[asic_id]
-
-    def get_dom_threshold_tbl(self, asic_id):
-        return self.dom_threshold_tbl[asic_id]
-
-    def get_status_tbl(self, asic_id):
-        return self.status_tbl[asic_id]
-
-    def get_pm_tbl(self, asic_id):
-        return self.pm_tbl[asic_id]
-
-    def get_app_port_tbl(self, asic_id):
-        return self.app_port_tbl[asic_id]
-
-    def get_state_db(self, asic_id):
-        return self.state_db[asic_id]
-
-    def get_cfg_port_tbl(self, asic_id):
-        return self.cfg_port_tbl[asic_id]
-
-    def get_state_port_tbl(self, asic_id):
-        return self.state_port_tbl[asic_id]
 
 #
 # Main =========================================================================
