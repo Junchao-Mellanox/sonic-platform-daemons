@@ -5,6 +5,13 @@
     Transceiver information update daemon for SONiC
 """
 
+from sonic_py_common import syslogger
+# Global logger instance for helper functions and classes
+# TODO: Refactor so that we only need the logger inherited
+# by DaemonXcvrd
+SYSLOG_IDENTIFIER = "xcvrd"
+helper_logger = syslogger.SysLogger(SYSLOG_IDENTIFIER, enable_runtime_config=True)
+
 try:
     import ast
     import copy
@@ -22,7 +29,7 @@ try:
     import ctypes
 
     from natsort import natsorted
-    from sonic_py_common import daemon_base, device_info, logger
+    from sonic_py_common import daemon_base
     from sonic_py_common import multi_asic
     from swsscommon import swsscommon
 
@@ -42,8 +49,6 @@ except ImportError as e:
 #
 # Constants ====================================================================
 #
-
-SYSLOG_IDENTIFIER = "xcvrd"
 
 PLATFORM_SPECIFIC_MODULE_NAME = "sfputil"
 PLATFORM_SPECIFIC_CLASS_NAME = "SfpUtil"
@@ -112,11 +117,6 @@ g_dict = {}
 platform_sfputil = None
 # Global chassis object based on new platform api
 platform_chassis = None
-
-# Global logger instance for helper functions and classes
-# TODO: Refactor so that we only need the logger inherited
-# by DaemonXcvrd
-helper_logger = logger.Logger(SYSLOG_IDENTIFIER)
 
 #
 # Helper functions =============================================================
@@ -2399,7 +2399,7 @@ class DaemonXcvrd(daemon_base.DaemonBase):
     # Signal handler
     def signal_handler(self, sig, frame):
         if sig == signal.SIGHUP:
-            self.log_info("Caught SIGHUP - ignoring...")
+            helper_logger.refresh_config()
         elif sig == signal.SIGINT:
             self.log_info("Caught SIGINT - exiting...")
             self.stop_event.set()
