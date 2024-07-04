@@ -315,6 +315,8 @@ def notify_media_setting(logical_port_name, transceiver_dict,
             helper_logger.log_info("Media {} presence not detected during notify".format(physical_port))
             continue
         if physical_port not in transceiver_dict:
+            helper_logger.log_notice("physical_port is {}".format(physical_port))
+            helper_logger.log_notice("transceiver dict is {}".format(transceiver_dict))
             helper_logger.log_error("Media {} eeprom not populated in transceiver dict".format(physical_port))
             continue
 

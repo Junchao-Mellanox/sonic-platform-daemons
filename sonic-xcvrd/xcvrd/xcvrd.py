@@ -421,6 +421,7 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
     ganged_member_num = 1
 
     physical_port_list = port_mapping.logical_port_name_to_physical_port_list(logical_port_name)
+    helper_logger.log_notice("physical_port_list is {}".format(physical_port_list))
     if physical_port_list is None:
         helper_logger.log_error("No physical ports found for logical port '{}'".format(logical_port_name))
         return PHYSICAL_PORT_NOT_EXIST
@@ -429,13 +430,23 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
         ganged_port = True
 
     for physical_port in physical_port_list:
+        helper_logger.log_notice("physical_port is {}".format(physical_port))
         if stop_event.is_set():
             break
 
         if not _wrapper_get_presence(physical_port):
+            helper_logger.log_notice("physical_port is {} not presence".format(physical_port))
+            helper_logger.log_notice("checking sdk sysfs")
+            if os.path.exists('/sys/module/sx_core/asic0/module31/present'):
+                with open('/sys/module/sx_core/asic0/module31/present', 'r') as f:
+                    ff = f.read()
+                    helper_logger.log_notice("present file is {}".format(ff))
+            else:
+                helper_logger.log_notice("present file not exist")
             continue
 
         port_name = get_physical_port_name(logical_port_name, ganged_member_num, ganged_port)
+        helper_logger.log_notice("physical_port name is {}".format(port_name))
         ganged_member_num += 1
 
         try:
@@ -534,6 +545,7 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
                     ])
                 table.set(port_name, fvs)
             else:
+                helper_logger.log_notice("this port_info_dict is None")
                 return SFP_EEPROM_NOT_READY
 
         except NotImplementedError:
@@ -1888,6 +1900,7 @@ class SfpStateUpdateTask(threading.Thread):
             if asic_index is None:
                 helper_logger.log_warning("Got invalid asic index for {}, ignored while posting SFP info during boot-up".format(logical_port_name))
                 continue
+            helper_logger.log_notice("_post_port_sfp_info_and_dom_thr_to_db_once for logical_port_name {}".format(logical_port_name))
             rc = post_port_sfp_info_to_db(logical_port_name, port_mapping, xcvr_table_helper.get_intf_tbl(asic_index), transceiver_dict, stop_event)
             if rc != SFP_EEPROM_NOT_READY:
                 post_port_dom_threshold_info_to_db(logical_port_name, port_mapping, xcvr_table_helper.get_dom_threshold_tbl(asic_index), stop_event)
@@ -1931,6 +1944,7 @@ class SfpStateUpdateTask(threading.Thread):
 
     def init(self):
         port_mapping_data = port_mapping.get_port_mapping(self.namespaces)
+        helper_logger.log_notice("xcvrd port_mapping_data: {}".format(port_mapping_data))
 
         # Post all the current interface sfp/dom threshold info to STATE_DB
         self.retry_eeprom_set = self._post_port_sfp_info_and_dom_thr_to_db_once(port_mapping_data, self.xcvr_table_helper, self.main_thread_stop_event)
