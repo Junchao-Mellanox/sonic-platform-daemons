@@ -435,7 +435,8 @@ def post_port_sfp_info_to_db(logical_port_name, port_mapping, table, transceiver
             break
 
         if not _wrapper_get_presence(physical_port):
-            helper_logger.log_notice("physical_port is {} not presence".format(physical_port))
+            sfp = platform_chassis.get_sfp(physical_port)
+            helper_logger.log_notice("physical_port is {} not presence with reason {}".format(physical_port, sfp.not_presence_reason))
             helper_logger.log_notice("checking sdk sysfs")
             if os.path.exists('/sys/module/sx_core/asic0/module31/present'):
                 with open('/sys/module/sx_core/asic0/module31/present', 'r') as f:
