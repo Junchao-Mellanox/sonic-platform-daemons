@@ -59,7 +59,7 @@ def get_lane_speed_key(physical_port, port_speed, lane_count):
             if host_electrical_interface_id:
                 lane_speed_key = LANE_SPEED_KEY_PREFIX + host_electrical_interface_id.split()[0]
     else:
-        speed_per_lane = port_speed / 1000 / lane_count
+        speed_per_lane = int(port_speed) / 1000 / lane_count
         speed_per_lane_int = int(speed_per_lane)
         if speed_per_lane - speed_per_lane_int == 0:
             speed_per_lane = speed_per_lane_int
