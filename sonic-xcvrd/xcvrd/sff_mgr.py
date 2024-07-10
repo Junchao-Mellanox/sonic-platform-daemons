@@ -472,6 +472,8 @@ class SffManagerTask(threading.Thread):
                 else:
                     self.log_error("{}: Failed to {} TX with lanes mask: {}".format(
                         lport, "disable" if target_tx_disable_flag else "enable", bin(mask)))
+                
+                sfp.write_eeprom(93, 1, b'\x05')
 
             # Take a snapshot for port_dict, this will be used to calculate diff
             # later in the while loop to determine if there's really a value
