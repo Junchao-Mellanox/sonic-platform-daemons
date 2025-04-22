@@ -20,6 +20,7 @@ try:
     import re
     import traceback
     import ctypes
+    import queue
 
     from natsort import natsorted
     from sonic_py_common import daemon_base, syslogger
@@ -590,6 +591,91 @@ def is_warm_reboot_enabled():
 # Helper classes ===============================================================
 #
 
+class CmisManagerDispatcher(threading.Thread):
+    def __init__(self, namespaces, port_mapping, main_thread_stop_event, task_list,skip_cmis_mgr=False):
+        threading.Thread.__init__(self)
+        self.namespaces = namespaces
+        self.port_mapping = port_mapping
+        self.task_stopping_event = main_thread_stop_event
+        self.task_list = task_list
+        self.skip_cmis_mgr = skip_cmis_mgr
+        self.queues = []
+        self.current_events = []
+        
+    def run(self):
+        self.xcvr_table_helper = XcvrTableHelper(self.namespaces)
+
+        helper_logger.log_notice("Waiting for PortConfigDone...")
+        for namespace in self.namespaces:
+            self.wait_for_port_config_done(namespace)
+
+        logical_port_list = self.port_mapping.logical_port_list
+        for lport in logical_port_list:
+            self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_UNKNOWN)
+            
+        for task in self.task_list:
+            self.queues.append(queue.Queue())
+            task.set_queue(self.queues[-1])
+            task.start()
+
+        # APPL_DB for CONFIG updates, and STATE_DB for insertion/removal
+        port_change_observer = PortChangeObserver(self.namespaces, helper_logger,
+                                                  self.task_stopping_event,
+                                                  self.on_port_update_event)
+        chunk_size = len(self.port_mapping.physical_to_logical) // len(self.task_list)
+        while not self.task_stopping_event.is_set():
+            self.current_events.clear()
+            has_event = port_change_observer.handle_port_update_event()
+            task_set = set()
+            if has_event:
+                for event in self.current_events:
+                    pport = self.port_mapping.get_logical_to_physical(event.port_name)[0]
+                    task_index = (pport - 1) // chunk_size
+                    helper_logger.log_notice(f'putting port event {event.port_name} to queue {task_index}')
+                    self.queues[task_index].put_nowait(event)
+            for index, task in enumerate(self.task_list):
+                if index in task_set:
+                    continue
+                task.queue.put_nowait(None)
+                
+    def update_port_transceiver_status_table_sw_cmis_state(self, lport, cmis_state_to_set):
+        asic_index = self.port_mapping.get_asic_id_for_logical_port(lport)
+        status_table = self.xcvr_table_helper.get_status_tbl(asic_index)
+        if status_table is None:
+            helper_logger.log_error("status_table is None while updating "
+                                    "sw CMIS state for lport {}".format(lport))
+            return
+
+        fvs = swsscommon.FieldValuePairs([('cmis_state', cmis_state_to_set)])
+        status_table.set(lport, fvs)
+        
+    def wait_for_port_config_done(self, namespace):
+        # Connect to APPL_DB and subscribe to PORT table notifications
+        appl_db = daemon_base.db_connect("APPL_DB", namespace=namespace)
+
+        sel = swsscommon.Select()
+        port_tbl = swsscommon.SubscriberStateTable(appl_db, swsscommon.APP_PORT_TABLE_NAME)
+        sel.addSelectable(port_tbl)
+
+        # Make sure this daemon started after all port configured
+        while not self.task_stopping_event.is_set():
+            (state, c) = sel.select(port_event_helper.SELECT_TIMEOUT_MSECS)
+            if state == swsscommon.Select.TIMEOUT:
+                continue
+            if state != swsscommon.Select.OBJECT:
+                self.log_warning("sel.select() did not return swsscommon.Select.OBJECT")
+                continue
+
+            (key, op, fvp) = port_tbl.pop()
+            if key in ["PortConfigDone", "PortInitDone"]:
+                break
+
+    def on_port_update_event(self, port_change_event):
+        if port_change_event.event_type not in [port_change_event.PORT_SET, port_change_event.PORT_DEL]:
+            return
+                
+        self.current_events.append(port_change_event)
+
 # Thread wrapper class for CMIS transceiver management
 
 class CmisManagerTask(threading.Thread):
@@ -612,6 +698,10 @@ class CmisManagerTask(threading.Thread):
         self.isPortConfigDone = False
         self.skip_cmis_mgr = skip_cmis_mgr
         self.namespaces = namespaces
+        self.queue = None
+
+    def set_queue(self, queue):
+        self.queue = queue
 
     def log_debug(self, message):
         helper_logger.log_debug("CMIS: {}".format(message))
@@ -634,9 +724,6 @@ class CmisManagerTask(threading.Thread):
         status_table.set(lport, fvs)
 
     def on_port_update_event(self, port_change_event):
-        if port_change_event.event_type not in [port_change_event.PORT_SET, port_change_event.PORT_DEL]:
-            return
-
         lport = port_change_event.port_name
         pport = port_change_event.port_index
 
@@ -1126,25 +1213,15 @@ class CmisManagerTask(threading.Thread):
     def task_worker(self):
         self.xcvr_table_helper = XcvrTableHelper(self.namespaces)
 
-        self.log_notice("Waiting for PortConfigDone...")
-        for namespace in self.namespaces:
-            self.wait_for_port_config_done(namespace)
-
-        logical_port_list = self.port_mapping.logical_port_list
-        for lport in logical_port_list:
-            self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_UNKNOWN)
-
         is_fast_reboot = is_fast_reboot_enabled()
-
-        # APPL_DB for CONFIG updates, and STATE_DB for insertion/removal
-        port_change_observer = PortChangeObserver(self.namespaces, helper_logger,
-                                                  self.task_stopping_event,
-                                                  self.on_port_update_event)
 
         while not self.task_stopping_event.is_set():
             # Handle port change event from main thread
-            port_change_observer.handle_port_update_event()
-
+            port_change_event = self.queue.get()
+            if port_change_event is not None:
+                helper_logger.log_notice(f'getting port event {port_change_event.port_name}')
+                self.on_port_update_event(port_change_event)
+            
             for lport, info in self.port_dict.items():
                 if self.task_stopping_event.is_set():
                     break
@@ -2294,11 +2371,15 @@ class DaemonXcvrd(daemon_base.DaemonBase):
             self.log_notice("Skipping SFF Task Manager")
 
         # Start the CMIS manager
-        cmis_manager = None
         if not self.skip_cmis_mgr:
-            cmis_manager = CmisManagerTask(self.namespaces, port_mapping_data, self.stop_event, self.skip_cmis_mgr)
-            cmis_manager.start()
-            self.threads.append(cmis_manager)
+            cmis_manager_task_list = []
+            for i in range(4):
+                cmis_manager = CmisManagerTask(self.namespaces, port_mapping_data, self.stop_event, self.skip_cmis_mgr)
+                cmis_manager_task_list.append(cmis_manager)
+                self.threads.append(cmis_manager)
+            cmis_manager_dispatcher = CmisManagerDispatcher(self.namespaces, port_mapping_data, self.stop_event, cmis_manager_task_list, self.skip_cmis_mgr)
+            cmis_manager_dispatcher.start()
+            self.threads.append(cmis_manager_dispatcher)
 
         # Start the dom sensor info update thread
         dom_info_update = DomInfoUpdateTask(self.namespaces, port_mapping_data, self.sfp_obj_dict, self.stop_event, self.skip_cmis_mgr, helper_logger)
