@@ -631,6 +631,8 @@ class CmisManagerDispatcher(threading.Thread):
                 for event in self.current_events:
                     pport = self.port_mapping.get_logical_to_physical(event.port_name)[0]
                     task_index = (pport - 1) // chunk_size
+                    if task_index >= len(self.queues):
+                        task_index = len(self.queues) - 1
                     helper_logger.log_notice(f'putting port event {event.port_name} to queue {task_index}')
                     self.queues[task_index].put_nowait(event)
             for index, task in enumerate(self.task_list):
