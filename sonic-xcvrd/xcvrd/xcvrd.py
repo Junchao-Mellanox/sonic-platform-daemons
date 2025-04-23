@@ -633,8 +633,9 @@ class CmisManagerDispatcher(threading.Thread):
                     task_index = (pport - 1) // chunk_size
                     if task_index >= len(self.queues):
                         task_index = len(self.queues) - 1
-                    helper_logger.log_notice(f'putting port event {event.port_name} to queue {task_index}')
+                    #helper_logger.log_notice(f'putting port event {event.port_name} to queue {task_index}')
                     self.queues[task_index].put_nowait(event)
+                    task_set.add(task_index)
             for index, task in enumerate(self.task_list):
                 if index in task_set:
                     continue
@@ -1219,11 +1220,17 @@ class CmisManagerTask(threading.Thread):
 
         while not self.task_stopping_event.is_set():
             # Handle port change event from main thread
-            port_change_event = self.queue.get()
-            if port_change_event is not None:
-                helper_logger.log_notice(f'getting port event {port_change_event.port_name}')
-                self.on_port_update_event(port_change_event)
-            
+            while True:
+                try:
+                    port_change_event = self.queue.get_nowait()
+                    if port_change_event is not None:
+                        #helper_logger.log_notice(f'getting port event {port_change_event.port_name}')
+                        self.on_port_update_event(port_change_event)
+                    else:
+                        break
+                except queue.Empty:
+                    break
+
             for lport, info in self.port_dict.items():
                 if self.task_stopping_event.is_set():
                     break
