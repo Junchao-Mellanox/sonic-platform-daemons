@@ -548,11 +548,8 @@ def update_port_transceiver_status_table_sw(logical_port_name, status_tbl, statu
     status_tbl.set(logical_port_name, fvs)
 
 def get_cmis_state_from_state_db(lport, status_tbl):
-    found, transceiver_status_dict = status_tbl.get(lport)
-    if found and 'cmis_state' in dict(transceiver_status_dict):
-        return dict(transceiver_status_dict)['cmis_state']
-    else:
-        return CMIS_STATE_UNKNOWN
+    found, cmis_state = status_tbl.hget(lport, 'cmis_state')
+    return cmis_state if found else CMIS_STATE_UNKNOWN
 
 # Delete port from SFP status table
 
