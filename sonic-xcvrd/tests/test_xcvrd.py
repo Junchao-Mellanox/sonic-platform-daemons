@@ -273,9 +273,11 @@ class TestXcvrdThreadException(object):
     @patch('xcvrd.xcvrd.get_cmis_application_desired', MagicMock(side_effect=KeyError))
     @patch('xcvrd.xcvrd.log_exception_traceback')
     @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')
+    @patch('xcvrd.xcvrd.XcvrTableHelper.get_state_port_tbl')
     @patch('xcvrd.xcvrd.platform_chassis')
-    def test_CmisManagerTask_get_xcvr_api_exception(self, mock_platform_chassis, mock_get_status_sw_tbl, mock_log_exception_traceback):
+    def test_CmisManagerTask_get_xcvr_api_exception(self, mock_platform_chassis, mock_get_state_port_tbl, mock_get_status_sw_tbl, mock_log_exception_traceback):
         mock_get_status_sw_tbl = Table("STATE_DB", TRANSCEIVER_STATUS_SW_TABLE)
+        mock_get_state_port_tbl.return_value = Table("APPL_DB", 'PORT_TABLE')
         mock_sfp = MagicMock()
         mock_sfp.get_presence.return_value = True
         mock_platform_chassis.get_sfp = MagicMock(return_value=mock_sfp)
@@ -283,13 +285,12 @@ class TestXcvrdThreadException(object):
         stop_event = threading.Event()
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event)
         task.task_stopping_event.is_set = MagicMock(side_effect=[False, False, True])
-        task.get_host_tx_status = MagicMock(return_value='true')
-        task.get_port_admin_status = MagicMock(return_value='up')
         task.get_cfg_port_tbl = MagicMock()
         task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
         task.xcvr_table_helper.get_status_sw_tbl.return_value = mock_get_status_sw_tbl
         port_change_event = PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_SET,
-                                            {'speed':'400000', 'lanes':'1,2,3,4,5,6,7,8'})
+                                            {'speed':'400000', 'lanes':'1,2,3,4,5,6,7,8', 
+                                             'admin_status':'up', 'host_tx_status':'true'})
 
         # Case 1: get_xcvr_api() raises an exception
         task.on_port_update_event(port_change_event)
