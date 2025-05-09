@@ -1053,14 +1053,13 @@ class TestXcvrdScript(object):
         del_port_sfp_dom_info_from_db(logical_port_name, port_mapping, [init_tbl, dom_tbl, dom_threshold_tbl, pm_tbl, firmware_info_tbl])
         assert dom_tbl.get_size() == 0
 
-    @pytest.mark.parametrize("mock_found, mock_status_dict, expected_cmis_state", [
-        (True, {'cmis_state': CMIS_STATE_INSERTED}, CMIS_STATE_INSERTED),
-        (False, {}, CMIS_STATE_UNKNOWN),
-        (True, {'other_key': 'some_value'}, CMIS_STATE_UNKNOWN)
+    @pytest.mark.parametrize("mock_found, mock_state, expected_cmis_state", [
+        (True, CMIS_STATE_INSERTED, CMIS_STATE_INSERTED),
+        (False, None, CMIS_STATE_UNKNOWN)
     ])
-    def test_get_cmis_state_from_state_db(self, mock_found, mock_status_dict, expected_cmis_state):
+    def test_get_cmis_state_from_state_db(self, mock_found, mock_state, expected_cmis_state):
         status_tbl = MagicMock()
-        status_tbl.get.return_value = (mock_found, mock_status_dict)
+        status_tbl.hget.return_value = (mock_found, mock_state)
         assert get_cmis_state_from_state_db("Ethernet0", status_tbl) == expected_cmis_state
 
     @patch('xcvrd.xcvrd_utilities.port_event_helper.PortMapping.logical_port_name_to_physical_port_list', MagicMock(return_value=[0]))
@@ -2215,7 +2214,7 @@ class TestXcvrdScript(object):
         stop_event = threading.Event()
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event)
         cfg_port_tbl = MagicMock()
-        cfg_port_tbl.get = MagicMock(return_value=(True, (('laser_freq', 193100),)))
+        cfg_port_tbl.hget = MagicMock(return_value=(True, 193100))
         mock_table_helper.get_cfg_port_tbl = MagicMock(return_value=cfg_port_tbl)
         task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
         task.xcvr_table_helper.get_cfg_port_tbl = mock_table_helper.get_cfg_port_tbl
@@ -2227,7 +2226,7 @@ class TestXcvrdScript(object):
         stop_event = threading.Event()
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event)
         cfg_port_tbl = MagicMock()
-        cfg_port_tbl.get = MagicMock(return_value=(True, (('tx_power', -10),)))
+        cfg_port_tbl.hget = MagicMock(return_value=(True, -10))
         mock_table_helper.get_cfg_port_tbl = MagicMock(return_value=cfg_port_tbl)
         task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
         task.xcvr_table_helper.get_cfg_port_tbl = mock_table_helper.get_cfg_port_tbl
