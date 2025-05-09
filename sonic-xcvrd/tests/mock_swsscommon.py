@@ -39,8 +39,9 @@ class Table:
     
     def hget(self, key, field):
         if key in self.mock_dict:
-            if field in self.mock_dict[key]:
-                return True, self.mock_dict[key][field]
+            for fv in self.mock_dict[key]:
+                if fv[0] == field:
+                    return True, fv[1]
         return False, None
 
     def get_size(self):
